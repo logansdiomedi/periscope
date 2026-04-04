@@ -8,7 +8,7 @@ from java.awt.event import ActionListener
 from javax.swing import (
     JPanel, JButton, JLabel, JTextField, JTextArea, JScrollPane,
     BorderFactory, JSeparator, SwingConstants, SwingUtilities,
-    BoxLayout, Box
+    BoxLayout, Box, JCheckBox, JFileChooser
 )
 from javax.swing.border import EmptyBorder
 import threading
@@ -37,6 +37,26 @@ EXT_NAME = "Periscope"
 
 HTTPS_PORTS    = (443, 8443, 444, 4443, 9443)
 REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+# Extensions considered static assets (skipped when "Skip static assets" is on)
+_STATIC_EXTS = frozenset([
+    '.gltf', '.glb', '.bin', '.obj', '.fbx',
+    '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp', '.bmp',
+    '.woff', '.woff2', '.ttf', '.eot', '.otf',
+    '.mp4', '.webm', '.mp3', '.wav', '.ogg',
+    '.cube', '.svg',
+])
+
+# Localization JS bundle filenames (e.g. ./de-BBy7132g.js, ./zh-Hant-CVrhwGZQ.js)
+_LOCALE_RE = re.compile(
+    r'^\./(?:de|en-GB|es|fr|ja|ko|no|pl|pt|pt-BR|ru|sv|tr|uk|'
+    r'zh|zh-Hant|zh-Hans|xx-XX|ar|nl|fi|cs|da|el|he|hi|id|it|ms|ro|sk|th|vi)'
+    r'-[A-Za-z0-9_\-]+\.js$'
+)
+
+# Bare library-name strings: no path separator, ends in .js / .json
+# e.g. "URI.js", "Vue.js", "react.production.min.js", "react.test.json"
+_BARE_LIB_RE = re.compile(r'^[^/]+\.(?:m?js|min\.js|json)$', re.IGNORECASE)
 
 
 # -----------------------------------------------------------------------------
@@ -76,7 +96,9 @@ class BurpExtender(IBurpExtender, ITab):
         callbacks.setExtensionName(EXT_NAME)
 
         # VHost blast cancel signal
-        self._vhost_cancel = threading.Event()
+        self._vhost_cancel  = threading.Event()
+        # Link import cancel signal
+        self._import_cancel = threading.Event()
 
         self._panel = self._build_ui()
         callbacks.addSuiteTab(self)
@@ -111,7 +133,7 @@ class BurpExtender(IBurpExtender, ITab):
         credit_panel = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0))
         credit_panel.setOpaque(False)
 
-        c1 = JLabel("v1.0 - By ")
+        c1 = JLabel("v1.1 - By ")
         c1.setFont(Font("Monospaced", Font.PLAIN, 11))
         c1.setForeground(Color(0x00, 0xBF, 0xFF))
 
@@ -201,6 +223,44 @@ class BurpExtender(IBurpExtender, ITab):
         vhost_panel.add(vhost_row1)
         vhost_panel.add(vhost_row2)
 
+        # -- Link Import ------------------------------------------------------
+        link_panel = JPanel()
+        link_panel.setLayout(BoxLayout(link_panel, BoxLayout.Y_AXIS))
+        link_panel.setBorder(BorderFactory.createTitledBorder("Link Import"))
+
+        # Row 1: import buttons
+        link_row1 = JPanel(FlowLayout(FlowLayout.LEFT, 6, 2))
+        self._btn_import_jslf   = self._btn("Import JSLinkFinder Output", self._do_import_jslf)
+        self._btn_import_gap    = self._btn("Import GAP Output",          self._do_import_gap)
+        self._btn_import_cancel = self._btn("Cancel Import",              self._do_cancel_import)
+        self._btn_import_cancel.setEnabled(False)
+        self._btn_import_cancel.setForeground(Color(0xCC, 0x44, 0x44))
+        link_row1.add(self._btn_import_jslf)
+        link_row1.add(self._btn_import_gap)
+        link_row1.add(self._btn_import_cancel)
+
+        # Row 2: filter options
+        link_row2 = JPanel(FlowLayout(FlowLayout.LEFT, 6, 2))
+        self._import_scope_chk  = JCheckBox("In-scope only",      True)
+        self._import_static_chk = JCheckBox("Skip static assets", True)
+        link_row2.add(self._import_scope_chk)
+        link_row2.add(self._import_static_chk)
+        link_row2.add(Box.createHorizontalStrut(10))
+        link_row2.add(JLabel("Threads:"))
+        self._import_threads_fld = JTextField("5", 4)
+        link_row2.add(self._import_threads_fld)
+
+        # Row 3: format note
+        link_row3 = JPanel(FlowLayout(FlowLayout.LEFT, 6, 1))
+        gap_note = JLabel("Note: GAP output requires 'Show origin endpoint' to be enabled in the GAP extension settings.")
+        gap_note.setFont(Font("Monospaced", Font.PLAIN, 10))
+        gap_note.setForeground(Color(0x88, 0x88, 0x88))
+        link_row3.add(gap_note)
+
+        link_panel.add(link_row1)
+        link_panel.add(link_row2)
+        link_panel.add(link_row3)
+
         # -- Log Area ---------------------------------------------------------
         self._log_area = JTextArea(18, 80)
         self._log_area.setEditable(False)
@@ -221,6 +281,8 @@ class BurpExtender(IBurpExtender, ITab):
         center.add(sitemap_panel)
         center.add(Box.createVerticalStrut(4))
         center.add(vhost_panel)
+        center.add(Box.createVerticalStrut(4))
+        center.add(link_panel)
         center.add(Box.createVerticalStrut(4))
         center.add(scroll)
 
@@ -251,7 +313,8 @@ class BurpExtender(IBurpExtender, ITab):
         def _go():
             for b in [self._btn_populate, self._btn_populate_scope,
                       self._btn_by_ip, self._btn_by_host,
-                      self._btn_vhost_blast]:
+                      self._btn_vhost_blast,
+                      self._btn_import_jslf, self._btn_import_gap]:
                 b.setEnabled(enabled)
         SwingUtilities.invokeLater(_go)
 
@@ -261,7 +324,8 @@ class BurpExtender(IBurpExtender, ITab):
             self._btn_vhost_blast.setEnabled(not running)
             self._btn_vhost_cancel.setEnabled(running)
             for b in [self._btn_populate, self._btn_populate_scope,
-                      self._btn_by_ip, self._btn_by_host]:
+                      self._btn_by_ip, self._btn_by_host,
+                      self._btn_import_jslf, self._btn_import_gap]:
                 b.setEnabled(not running)
         SwingUtilities.invokeLater(_go)
 
@@ -713,6 +777,364 @@ class BurpExtender(IBurpExtender, ITab):
             self._log("\n--- Confirmed VHosts ---")
             for entry in found_new:
                 self._log("  " + entry)
+
+
+    # -- Link Import ----------------------------------------------------------
+
+    def _set_import_running(self, running):
+        """Toggle button states while a link import is active."""
+        def _go():
+            self._btn_import_jslf.setEnabled(not running)
+            self._btn_import_gap.setEnabled(not running)
+            self._btn_import_cancel.setEnabled(running)
+            for b in [self._btn_populate, self._btn_populate_scope,
+                      self._btn_by_ip, self._btn_by_host, self._btn_vhost_blast]:
+                b.setEnabled(not running)
+        SwingUtilities.invokeLater(_go)
+
+    def _do_cancel_import(self):
+        self._import_cancel.set()
+        self._log("[!] Import cancel requested...")
+        self._set_status("Cancelling import...")
+
+    def _do_import_jslf(self):
+        """Called on EDT. Show file picker, then kick off background import."""
+        path = self._choose_file("Select JSLinkFinder Output File")
+        if not path:
+            return
+        self._import_cancel.clear()
+        self._set_import_running(True)
+
+        def run():
+            try:
+                self._run_link_import(path, "JSLinkFinder", self._parse_jslinkfinder)
+            except:
+                err = sys.exc_info()[1]
+                self._log("[!] Import error: " + str(err))
+            finally:
+                self._set_import_running(False)
+                self._set_status("Import done.")
+
+        threading.Thread(target=run).start()
+
+    def _do_import_gap(self):
+        """Called on EDT. Show file picker, then kick off background import."""
+        path = self._choose_file("Select GAP Output File")
+        if not path:
+            return
+        self._import_cancel.clear()
+        self._set_import_running(True)
+
+        def run():
+            try:
+                self._run_link_import(path, "GAP", self._parse_gap)
+            except:
+                err = sys.exc_info()[1]
+                self._log("[!] Import error: " + str(err))
+            finally:
+                self._set_import_running(False)
+                self._set_status("Import done.")
+
+        threading.Thread(target=run).start()
+
+    def _choose_file(self, title="Select File"):
+        """Show a JFileChooser modal. Must be called from the EDT. Returns path or None."""
+        chooser = JFileChooser()
+        chooser.setDialogTitle(title)
+        ret = chooser.showOpenDialog(self._panel)
+        if ret == JFileChooser.APPROVE_OPTION:
+            return chooser.getSelectedFile().getAbsolutePath()
+        return None
+
+    def _run_link_import(self, file_path, label, parser_fn):
+        """Parse file and send requests for all discovered URLs (background thread)."""
+        self._set_status("Parsing {} file...".format(label))
+        self._log("\n[*] Importing {} output: {}".format(label, file_path))
+
+        scope_only  = self._import_scope_chk.isSelected()
+        skip_static = self._import_static_chk.isSelected()
+
+        try:
+            num_threads = max(1, int(self._import_threads_fld.getText().strip()))
+        except ValueError:
+            num_threads = 5
+
+        urls = parser_fn(file_path, scope_only, skip_static)
+        if not urls:
+            self._log("[*] No URLs to request after filtering.")
+            return
+
+        url_list = sorted(urls)
+        self._log("[*] Sending {} URLs ({} threads)...".format(len(url_list), num_threads))
+
+        work_q      = Queue.Queue()
+        for u in url_list:
+            work_q.put(u)
+
+        sent_count  = [0]
+        error_count = [0]
+        total       = len(url_list)
+        lock        = threading.Lock()
+        ua          = self._ua()
+
+        def worker():
+            while not self._import_cancel.is_set():
+                try:
+                    url = work_q.get(timeout=0.5)
+                except Queue.Empty:
+                    break
+                try:
+                    resp = self._send_request(url, ua)
+                    with lock:
+                        if resp is not None:
+                            sent_count[0] += 1
+                        else:
+                            error_count[0] += 1
+                        done = sent_count[0] + error_count[0]
+                        if done % 25 == 0:
+                            self._set_status("{}: {}/{} done".format(label, done, total))
+                except:
+                    with lock:
+                        error_count[0] += 1
+                finally:
+                    work_q.task_done()
+
+        threads = []
+        for _ in range(num_threads):
+            t = threading.Thread(target=worker)
+            t.daemon = True
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        if self._import_cancel.is_set():
+            self._log("[!] Import cancelled. {}/{} sent, {} errors.".format(
+                sent_count[0], total, error_count[0]))
+        else:
+            self._log("[+] {} import complete. {}/{} sent, {} errors.".format(
+                label, sent_count[0], total, error_count[0]))
+
+    # -- Parsers --------------------------------------------------------------
+
+    def _parse_jslinkfinder(self, file_path, scope_only, skip_static):
+        """
+        Parse Burp JS LinkFinder output file.
+
+        Format:
+          [+] Valid URL found: <absolute_url_of_js_file>
+          <whitespace><n> - <extracted_path_or_url>
+
+        Opens in binary mode to avoid Jython platform-encoding exceptions on
+        large files. Lines are decoded as UTF-8 with replacement for bad bytes.
+        """
+        urls           = set()
+        total          = 0
+        skipped_noise  = 0
+        skipped_static = 0
+        skipped_scope  = 0
+        current_base   = None
+
+        try:
+            fh = open(file_path, 'rb')
+        except:
+            err = sys.exc_info()[1]
+            self._log("[!] Cannot open JSLinkFinder file: " + str(err))
+            return urls
+
+        self._log("[*] JSLinkFinder file opened, scanning...")
+        try:
+            for raw in fh:
+                try:
+                    line = raw.decode('utf-8', 'replace').rstrip(u'\r\n')
+                except:
+                    line = raw.rstrip('\r\n')
+
+                if line.startswith(u'[+] Valid URL found: '):
+                    current_base = line[21:].strip()
+                    continue
+
+                if not current_base:
+                    continue
+
+                # Match indented numbered entries - handles tabs or spaces
+                m = re.match(r'^\s+\d+\s+-\s+(.+)$', line)
+                if not m:
+                    continue
+
+                path = m.group(1).strip()
+                total += 1
+
+                if self._is_noise(path):
+                    skipped_noise += 1
+                    continue
+
+                url = self._resolve_path(path, current_base, dot_is_dir_relative=True)
+                if not url:
+                    skipped_noise += 1
+                    continue
+
+                if skip_static and self._is_static_url(url):
+                    skipped_static += 1
+                    continue
+
+                if scope_only and not self._is_in_scope(url):
+                    skipped_scope += 1
+                    continue
+
+                urls.add(url)
+        except:
+            err = sys.exc_info()[1]
+            self._log("[!] JSLinkFinder parse error at line ~{}: {}".format(total, str(err)))
+        finally:
+            try:
+                fh.close()
+            except:
+                pass
+
+        self._log("[*] JSLinkFinder: {} paths, -{} noise, -{} static, -{} scope => {} kept".format(
+            total, skipped_noise, skipped_static, skipped_scope, len(urls)))
+        return urls
+
+    def _parse_gap(self, file_path, scope_only, skip_static):
+        """
+        Parse GAP (Get All Parameters) output file.
+
+        Format:
+          <path_or_word>  [<source_url>]
+
+        Each line is a string extracted from <source_url>, with the source
+        URL in brackets at the end. Paths are resolved against the source
+        URL's host.
+        Returns a set of resolved, filtered URLs.
+        """
+        urls            = set()
+        total           = 0
+        skipped_noise   = 0
+        skipped_static  = 0
+        skipped_scope   = 0
+        _pat            = re.compile(r'^(.+?)\s+\[(.+?)\]\s*$')
+
+        try:
+            fh = open(file_path, 'rb')
+        except:
+            err = sys.exc_info()[1]
+            self._log("[!] Cannot open GAP file: " + str(err))
+            return urls
+
+        try:
+            for raw in fh:
+                try:
+                    line = raw.decode('utf-8', 'replace').rstrip(u'\r\n')
+                except:
+                    line = raw.rstrip('\r\n')
+
+                m = _pat.match(line)
+                if not m:
+                    continue
+                path   = m.group(1).strip()
+                source = m.group(2).strip()
+                total += 1
+
+                if self._is_noise(path):
+                    skipped_noise += 1
+                    continue
+
+                url = self._resolve_path(path, source, dot_is_dir_relative=True)
+                if not url:
+                    skipped_noise += 1
+                    continue
+
+                if skip_static and self._is_static_url(url):
+                    skipped_static += 1
+                    continue
+
+                if scope_only and not self._is_in_scope(url):
+                    skipped_scope += 1
+                    continue
+
+                urls.add(url)
+        except:
+            err = sys.exc_info()[1]
+            self._log("[!] GAP parse error at line ~{}: {}".format(total, str(err)))
+        finally:
+            try:
+                fh.close()
+            except:
+                pass
+
+        self._log("[*] GAP: {} paths, -{} noise, -{} static, -{} scope => {} kept".format(
+            total, skipped_noise, skipped_static, skipped_scope, len(urls)))
+        return urls
+
+    # -- URL utilities --------------------------------------------------------
+
+    def _is_noise(self, path):
+        """Return True if path is universally useless noise."""
+        if not path or not path.strip():
+            return True
+        p = path.strip()
+        # Fragment-only
+        if p.startswith('#'):
+            return True
+        # Localization JS bundle (e.g. ./de-BBy7132g.js)
+        if _LOCALE_RE.match(p):
+            return True
+        # Bare library-name string with no path separator (e.g. "URI.js", "Vue.js")
+        if '/' not in p and _BARE_LIB_RE.match(p):
+            return True
+        return False
+
+    def _is_static_url(self, url):
+        """Return True if the URL path ends with a known static asset extension."""
+        # Strip query string and fragment before checking extension
+        path = url.split('?')[0].split('#')[0]
+        dot  = path.rfind('.')
+        if dot == -1:
+            return False
+        return path[dot:].lower() in _STATIC_EXTS
+
+    def _resolve_path(self, path, base_url, dot_is_dir_relative=True):
+        """
+        Resolve path against base_url into a full URL.
+
+        dot_is_dir_relative=True  -> ./foo resolved relative to base_url's directory
+                                      (correct for same-directory JS chunks)
+        Bare paths (no ./ or /)   -> resolved from host root
+        Returns the full URL string, or None if base_url can't be parsed.
+        Fragment suffixes are stripped from the resolved URL.
+        """
+        p = path.strip()
+        if not p:
+            return None
+
+        # Already an absolute URL
+        if p.startswith('http://') or p.startswith('https://'):
+            # Strip fragment
+            return p.split('#')[0] or None
+
+        # Parse base URL
+        m = re.match(r'(https?)://([^/?#]+)([^?#]*)', base_url)
+        if not m:
+            return None
+        scheme    = m.group(1)
+        host      = m.group(2)
+        base_path = m.group(3)  # path component of base_url, no query/fragment
+
+        if p.startswith('/'):
+            # Root-relative; strip inline fragment
+            return '{}://{}{}'.format(scheme, host, p.split('#')[0])
+
+        if p.startswith('./') and dot_is_dir_relative:
+            # Relative to base directory (e.g. ./vendor-X.js next to the base JS file)
+            base_dir = base_path.rsplit('/', 1)[0] if '/' in base_path else ''
+            resolved = '{}/{}'.format(base_dir, p[2:])
+            return '{}://{}{}'.format(scheme, host, resolved.split('#')[0])
+
+        # No prefix (and not ./) - treat as root-relative
+        # Covers API paths like "api/v1/users", "ai-session-analyzer/role-has-rule?"
+        return '{}://{}/{}'.format(scheme, host, p.split('#')[0])
 
 
 # -----------------------------------------------------------------------------

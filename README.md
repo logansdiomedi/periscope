@@ -1,4 +1,4 @@
-# Periscope
+# Periscope v1.1
 
 Automated recon and discovery tool with a companion Burp Suite extension. Takes one or more domains and/or IP ranges, runs full DNS enumeration, resolves live hosts, scans common web ports, takes screenshots, and exposes a local API for Burp to populate the sitemap.
 
@@ -130,9 +130,9 @@ python3 periscope.py --api-only ./out --burp-api
 **DNS Enumeration**
 
 Queries three sources per domain and deduplicates across all of them:
-- `ip.thc.org` — passive DNS via the THC API
-- `subfinder` — multi-source passive subdomain enumeration
-- `crt.sh` — certificate transparency log search
+- `ip.thc.org` - passive DNS via the THC API
+- `subfinder` - multi-source passive subdomain enumeration
+- `crt.sh` - certificate transparency log search
 
 Hosts that resolve to an IP go into the live pipeline. Hosts that do not resolve are written to `potential-vhosts.txt` for use in VHost Blast later.
 
@@ -237,12 +237,49 @@ Iterates every discovered IP and open port combination, sending a request for ea
 
 - Runs in a configurable thread pool (default: 10 threads).
 - Can be cancelled mid-run with the Cancel Blast button. In-flight requests finish before the blast stops.
-- Follows redirects automatically, up to the configured Max Redirects limit (default: 3). The final status code at the end of the redirect chain is what gets evaluated — not the initial response code.
+- Follows redirects automatically, up to the configured Max Redirects limit (default: 3). The final status code at the end of the redirect chain is what gets evaluated, not the initial response code.
 - Redirect targets are resolved by connecting to their IP directly, so candidates from `potential-vhosts.txt` that do not resolve in DNS can still be followed through redirects.
 - Response body lengths can be filtered with the Ignore Response Lengths field. Any hit whose final response body size matches a configured exact value or range is discarded as a false positive.
 - When a valid vhost is confirmed, the entry is added to the sitemap tree under the hostname (not the raw IP).
 
 Default valid response codes: `200, 301, 302, 401`. Configurable in the extension UI.
+
+**Link Import**
+
+Imports discovered links from Burp JS LinkFinder and GAP (Get All Parameters) output files directly into the sitemap. Click either import button, select the output file from the file picker, and Periscope will parse it, filter the noise, resolve relative paths, and send each surviving URL through Burp to populate the sitemap with real responses.
+
+| Button | Behavior |
+|---|---|
+| Import JSLinkFinder Output | Parses Burp JS LinkFinder output and sends all resolved, filtered URLs to the sitemap. |
+| Import GAP Output | Parses GAP Links output and sends all resolved, filtered URLs to the sitemap. |
+| Cancel Import | Stops an in-progress import after in-flight requests finish. |
+
+**Options**
+
+| Field | Default | Description |
+|---|---|---|
+| In-scope only | On | Only import URLs that fall within Burp's active scope. Recommended. |
+| Skip static assets | On | Skips `.gltf`, `.png`, `.woff2`, `.mp4`, `.svg`, and other non-web-app asset types. |
+| Threads | 5 | Number of concurrent request threads during import. |
+
+**Filtering**
+
+The following are always discarded regardless of settings:
+- Fragment-only strings (`#foo`, `#/definitions/...`)
+- Bare library name strings with no path separator (`URI.js`, `Vue.js`, `react.production.min.js`)
+- Localization JS bundles (`./de-*.js`, `./zh-Hant-*.js`, `./xx-XX-*.js`, etc.)
+
+**Path resolution**
+
+Paths extracted from JS files are resolved against the source URL that contained them:
+- `/api/v1/users` - resolved against the source host root
+- `./vendor-abc123.js` - resolved relative to the source JS file's directory
+- `api/endpoint` (no prefix) - resolved against the source host root
+- `https://full.url/path` - kept as-is, scope filter then applies
+
+**GAP note**
+
+GAP must have "Show origin endpoint" enabled in its settings. This produces the `path  [source_url]` format that Periscope's parser expects. Output generated without it will not parse correctly.
 
 **Configuration Fields**
 

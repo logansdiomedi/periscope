@@ -33,7 +33,7 @@ BANNER = r"""
               surface everything. miss nothing.
               DNS recon → port scan → screenshots → API
 \033[0m
-\033[36mv1.0 - By \033[31mLogan Diomedi\033[36m - Depth Security (www.depthsecurity.com)\033[0m
+\033[36mv1.1 - By \033[31mLogan Diomedi\033[36m - Depth Security (www.depthsecurity.com)\033[0m
 """
 
 # -----------------------------------------------------------------------------
